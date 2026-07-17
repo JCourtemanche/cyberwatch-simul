@@ -1,10 +1,128 @@
+args:
+- description: Cortex XSIAM tenant API base URL (e.g. https://api-<tenant>.xdr.<region>.paloaltonetworks.com)
+  name: api_url
+  required: true
+  supportedModules: []
+- description: Cortex XSIAM API key value
+  name: api_key
+  required: true
+  secret: true
+  supportedModules: []
+- description: Cortex XSIAM API key ID (integer, sent as the x-xdr-auth-id header)
+  name: api_key_id
+  required: true
+  supportedModules: []
+- description: Optional Cyberwatch integration instance name (leave empty if only one)
+  name: cyberwatch_instance
+  supportedModules: []
+- description: Filter CVEs by Cyberwatch severity level
+  name: level
+  auto: PREDEFINED
+  predefined:
+  - level_low
+  - level_medium
+  - level_high
+  - level_critical
+  supportedModules: []
+- description: Only import CVEs prioritized (or not) in Cyberwatch
+  name: prioritized
+  auto: PREDEFINED
+  predefined:
+  - 'true'
+  - 'false'
+  supportedModules: []
+- description: Filter CVE announcements that are active
+  name: active
+  auto: PREDEFINED
+  predefined:
+  - 'true'
+  - 'false'
+  supportedModules: []
+- description: Filter CVE announcements that are ignored
+  name: ignored
+  auto: PREDEFINED
+  predefined:
+  - 'true'
+  - 'false'
+  supportedModules: []
+- description: Cyberwatch exploit_code_maturity filter (undefined, unproven, proof_of_concept, functional, high)
+  name: exploit_code_maturity
+  isArray: true
+  supportedModules: []
+- description: Cyberwatch CVSS access vector filter
+  name: access_vector
+  isArray: true
+  supportedModules: []
+- description: Filter CVEs by technology vendor (CPE)
+  name: technology_vendor
+  supportedModules: []
+- description: Filter CVEs by technology product (CPE)
+  name: technology_product
+  supportedModules: []
+- description: Only import CVEs whose last_modified >= this date. Accepts '3 days', '2025-01-01', or ISO 8601.
+  name: since
+  supportedModules: []
+- description: Maximum CVEs to fetch from Cyberwatch
+  name: hard_limit
+  defaultValue: '500'
+  supportedModules: []
+- description: Cyberwatch pagination size
+  name: per_page
+  defaultValue: '500'
+  supportedModules: []
+- description: Number of assets per BYOS submit request
+  name: batch_size
+  defaultValue: '100'
+  supportedModules: []
+- description: If true, build the payload but do not POST to Cortex
+  name: dry_run
+  auto: PREDEFINED
+  predefined:
+  - 'true'
+  - 'false'
+  defaultValue: 'false'
+  supportedModules: []
+- description: Verify the Cortex API TLS certificate
+  name: verify
+  auto: PREDEFINED
+  predefined:
+  - 'true'
+  - 'false'
+  defaultValue: 'true'
+  supportedModules: []
 commonfields:
-  id: CyberwatchBYOSImporter
+  id: 35039b31-924d-48aa-9209-4aa344544295
   version: -1
+comment: Import Cyberwatch CVEs into Cortex XSIAM Exposure Management via BYOS. Calls cyberwatch-list-cves + cyberwatch-fetch-cve on the Cyberwatch integration, aggregates results by asset, then POSTs to
+  /public_api/vulnerability-management/v1/external-scans/assets in batches.
+dockerimage: demisto/python3:3.12.13.10404775
+enabled: true
+engineinfo: {}
+mainengineinfo: {}
 name: CyberwatchBYOSImporter
+outputs:
+- contextPath: Cyberwatch.BYOS.assets_count
+  description: Number of assets submitted to BYOS
+  type: number
+- contextPath: Cyberwatch.BYOS.vulnerabilities_count
+  description: Number of vulnerabilities submitted to BYOS
+  type: number
+- contextPath: Cyberwatch.BYOS.cves_considered
+  description: CVEs kept after the 'since' filter
+  type: number
+- contextPath: Cyberwatch.BYOS.cves_dropped_by_since
+  description: CVEs dropped because last_modified predates 'since'
+  type: number
+- contextPath: Cyberwatch.BYOS.jobs
+  description: Per-batch responses from the BYOS submit endpoint
+  type: unknown
+pswd: ''
+restrictioncenter: {}
+runas: DBotWeakRole
+runonce: false
 script: |
   """
-  Cyberwatch -> Cortex XSIAM Exposure Management (Bring Your Own Scanner)
+  Cyberwatch to Cortex XSIAM Exposure Management (Bring Your Own Scanner)
 
   XSIAM Automation Script.
 
@@ -262,7 +380,7 @@ script: |
           return None
       try:
           parsed = dateparser.parse(since)
-      except Exception:  # pragma: no cover — dateparser is always available in XSOAR
+      except Exception:  # pragma: no cover - dateparser is always available in XSOAR
           parsed = None
       if parsed is None:
           raise DemistoException(f"Invalid 'since' value: {since!r}")
@@ -321,7 +439,7 @@ script: |
           return_results(CommandResults(
               outputs_prefix="Cyberwatch.BYOS",
               outputs={"assets_count": 0, "vulnerabilities_count": 0, "jobs": []},
-              readable_output="No CVEs returned by Cyberwatch — nothing to submit.",
+              readable_output="No CVEs returned by Cyberwatch - nothing to submit.",
           ))
           return
 
@@ -399,7 +517,7 @@ script: |
               "jobs": jobs,
           },
           readable_output=tableToMarkdown(
-              f"Cyberwatch → Cortex XSIAM BYOS ({len(assets)} assets, {vuln_count} vulnerabilities)",
+              f"Cyberwatch -> Cortex XSIAM BYOS ({len(assets)} assets, {vuln_count} vulnerabilities)",
               [
                   {
                       "batch": j["batch"],
@@ -417,108 +535,8 @@ script: |
 
   if __name__ in ("__main__", "__builtin__", "builtins"):
       main()
-type: python
-subtype: python3
-dockerimage: demisto/python3:3.12.11.4417419
-runas: DBotWeakRole
-enabled: true
 scripttarget: 0
-system: false
-timeout: '600'
-comment: Import Cyberwatch CVEs into Cortex XSIAM Exposure Management via BYOS. Calls cyberwatch-list-cves + cyberwatch-fetch-cve on the Cyberwatch integration, aggregates results by asset, then POSTs to
-  /public_api/vulnerability-management/v1/external-scans/assets in batches.
-tags:
-- cyberwatch
-- byos
-- exposure-management
-- vulnerability-management
-args:
-- name: api_url
-  required: true
-  description: Cortex XSIAM tenant API base URL (e.g. https://api-<tenant>.xdr.<region>.paloaltonetworks.com)
-- name: api_key
-  required: true
-  secret: true
-  description: Cortex XSIAM API key value
-- name: api_key_id
-  required: true
-  description: Cortex XSIAM API key ID (integer, sent as the x-xdr-auth-id header)
-- name: cyberwatch_instance
-  description: Optional Cyberwatch integration instance name (leave empty if only one)
-- name: level
-  auto: PREDEFINED
-  predefined:
-  - level_low
-  - level_medium
-  - level_high
-  - level_critical
-  description: Filter CVEs by Cyberwatch severity level
-- name: prioritized
-  auto: PREDEFINED
-  predefined:
-  - 'true'
-  - 'false'
-  description: Only import CVEs prioritized (or not) in Cyberwatch
-- name: active
-  auto: PREDEFINED
-  predefined:
-  - 'true'
-  - 'false'
-  description: Filter CVE announcements that are active
-- name: ignored
-  auto: PREDEFINED
-  predefined:
-  - 'true'
-  - 'false'
-  description: Filter CVE announcements that are ignored
-- name: exploit_code_maturity
-  isArray: true
-  description: Cyberwatch exploit_code_maturity filter (undefined, unproven, proof_of_concept, functional, high)
-- name: access_vector
-  isArray: true
-  description: Cyberwatch CVSS access vector filter
-- name: technology_vendor
-  description: Filter CVEs by technology vendor (CPE)
-- name: technology_product
-  description: Filter CVEs by technology product (CPE)
-- name: since
-  description: Only import CVEs whose last_modified >= this date. Accepts '3 days', '2025-01-01', or ISO 8601.
-- name: hard_limit
-  defaultValue: '500'
-  description: Maximum CVEs to fetch from Cyberwatch
-- name: per_page
-  defaultValue: '500'
-  description: Cyberwatch pagination size
-- name: batch_size
-  defaultValue: '100'
-  description: Number of assets per BYOS submit request
-- name: dry_run
-  auto: PREDEFINED
-  predefined:
-  - 'true'
-  - 'false'
-  defaultValue: 'false'
-  description: If true, build the payload but do not POST to Cortex
-- name: verify
-  auto: PREDEFINED
-  predefined:
-  - 'true'
-  - 'false'
-  defaultValue: 'true'
-  description: Verify the Cortex API TLS certificate
-outputs:
-- contextPath: Cyberwatch.BYOS.assets_count
-  type: number
-  description: Number of assets submitted to BYOS
-- contextPath: Cyberwatch.BYOS.vulnerabilities_count
-  type: number
-  description: Number of vulnerabilities submitted to BYOS
-- contextPath: Cyberwatch.BYOS.cves_considered
-  type: number
-  description: CVEs kept after the 'since' filter
-- contextPath: Cyberwatch.BYOS.cves_dropped_by_since
-  type: number
-  description: CVEs dropped because last_modified predates 'since'
-- contextPath: Cyberwatch.BYOS.jobs
-  type: unknown
-  description: Per-batch responses from the BYOS submit endpoint
+signature: ''
+subtype: python3
+tags: []
+type: python

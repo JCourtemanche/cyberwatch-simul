@@ -1,5 +1,5 @@
 """
-Cyberwatch -> Cortex XSIAM Exposure Management (Bring Your Own Scanner)
+Cyberwatch to Cortex XSIAM Exposure Management (Bring Your Own Scanner)
 
 XSIAM Automation Script.
 
@@ -257,7 +257,7 @@ def _parse_since(since: str | None) -> int | None:
         return None
     try:
         parsed = dateparser.parse(since)
-    except Exception:  # pragma: no cover — dateparser is always available in XSOAR
+    except Exception:  # pragma: no cover - dateparser is always available in XSOAR
         parsed = None
     if parsed is None:
         raise DemistoException(f"Invalid 'since' value: {since!r}")
@@ -316,7 +316,7 @@ def main():
         return_results(CommandResults(
             outputs_prefix="Cyberwatch.BYOS",
             outputs={"assets_count": 0, "vulnerabilities_count": 0, "jobs": []},
-            readable_output="No CVEs returned by Cyberwatch — nothing to submit.",
+            readable_output="No CVEs returned by Cyberwatch - nothing to submit.",
         ))
         return
 
@@ -394,7 +394,7 @@ def main():
             "jobs": jobs,
         },
         readable_output=tableToMarkdown(
-            f"Cyberwatch → Cortex XSIAM BYOS ({len(assets)} assets, {vuln_count} vulnerabilities)",
+            f"Cyberwatch -> Cortex XSIAM BYOS ({len(assets)} assets, {vuln_count} vulnerabilities)",
             [
                 {
                     "batch": j["batch"],
