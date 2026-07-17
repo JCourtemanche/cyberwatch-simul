@@ -1,0 +1,63 @@
+{
+  "vendor": "Cyberwatch",
+  "product": "Vulnerability Manager",
+  "version": "1.0",
+  "assets": [
+    {
+      "origin_asset_id": "cyberwatch-server-900",
+      "asset_name": "BSNS-WIN-ALICE",
+      "fqdn": ["BSNS-WIN-ALICE"],
+      "os_name": "Windows 10 Pro",
+      "vendor": "Cyberwatch",
+      "product": "Windows 10",
+      "version": "windows_10",
+      "last_seen": 1749931200,
+      "origin_tags": ["cyberwatch:server_id:900"],
+      "vulnerabilities": [
+        {
+          "vulnerability_id": "CVE-2021-44228",
+          "cve_id": ["CVE-2021-44228"],
+          "description": "Apache Log4j Remote Code Execution (Log4Shell)",
+          "confidence": "High",
+          "last_seen": 1749931200,
+          "raw_output": "{\"score\": 10.0, \"epss\": 0.9754, \"level\": \"level_critical\", \"exploit_code_maturity\": \"high\", \"environmental_score\": 10.0, \"prioritized\": true, \"ignored\": false, \"active\": true, \"updates\": []}",
+          "evidence": "Detected by Cyberwatch on BSNS-WIN-ALICE",
+          "scan_name": "Cyberwatch vulnerability scan"
+        },
+        {
+          "vulnerability_id": "CVE-2024-21413",
+          "cve_id": ["CVE-2024-21413"],
+          "description": "Microsoft Outlook Remote Code Execution Vulnerability",
+          "confidence": "Medium",
+          "last_seen": 1749931200,
+          "raw_output": "{\"score\": 9.8, \"epss\": 0.00586, \"level\": \"level_critical\", \"exploit_code_maturity\": \"proof_of_concept\", \"environmental_score\": 9.3, \"prioritized\": true}",
+          "evidence": "Detected by Cyberwatch on BSNS-WIN-ALICE",
+          "scan_name": "Cyberwatch vulnerability scan"
+        }
+      ]
+    },
+    {
+      "origin_asset_id": "cyberwatch-server-1000",
+      "asset_name": "srv-web-01.business.org",
+      "fqdn": ["srv-web-01.business.org"],
+      "os_name": "Ubuntu 22.04 LTS",
+      "vendor": "Cyberwatch",
+      "product": "Ubuntu 22.04",
+      "version": "ubuntu_2204_64",
+      "last_seen": 1749931200,
+      "origin_tags": ["cyberwatch:server_id:1000"],
+      "vulnerabilities": [
+        {
+          "vulnerability_id": "CVE-2024-6387",
+          "cve_id": ["CVE-2024-6387"],
+          "description": "OpenSSH regreSSHion Signal Handler Race Condition",
+          "confidence": "High",
+          "last_seen": 1749931200,
+          "raw_output": "{\"score\": 8.1, \"epss\": 0.6843, \"level\": \"level_high\", \"exploit_code_maturity\": \"functional\", \"prioritized\": true}",
+          "evidence": "Detected by Cyberwatch on srv-web-01.business.org",
+          "scan_name": "Cyberwatch vulnerability scan"
+        }
+      ]
+    }
+  ]
+}
