@@ -34,6 +34,11 @@ VENDOR = "Cyberwatch"
 PRODUCT = "Vulnerability Manager"
 VERSION = "1.0"
 
+# Bumped every time the script's payload logic changes. Printed at startup
+# so we can tell from the war-room / logs which version XSIAM is running -
+# if you see an older value, delete the imported script and re-import.
+SCRIPT_VERSION = "1.2.0"
+
 BYOS_PATH = "/public_api/vulnerability-management/v1/external-scans/assets"
 DEFAULT_BATCH_SIZE = 100
 DEFAULT_HARD_LIMIT = 500
@@ -306,6 +311,10 @@ def main():
     since_ts = _parse_since(args.get("since"))
     now_ts = int(time.time())
 
+    demisto.info(
+        f"CyberwatchBYOSImporter version={SCRIPT_VERSION} starting - "
+        f"now_ts={now_ts} since_ts={since_ts}"
+    )
     demisto.info(f"Fetching CVEs from Cyberwatch with args={cw_args} since={since_ts}")
     list_cves = list_cyberwatch_cves(instance, cw_args)
     demisto.info(f"cyberwatch-list-cves returned {len(list_cves)} CVEs")
@@ -358,8 +367,9 @@ def main():
                 "jobs": [],
             },
             readable_output=(
-                f"[dry_run] Would submit {len(assets)} assets / {vuln_count} "
-                f"vulnerabilities to Cortex XSIAM BYOS in batches of {batch_size}."
+                f"[dry_run - importer v{SCRIPT_VERSION}] Would submit {len(assets)} "
+                f"assets / {vuln_count} vulnerabilities to Cortex XSIAM BYOS in "
+                f"batches of {batch_size}."
             ),
         ))
         return
@@ -392,7 +402,8 @@ def main():
             "jobs": jobs,
         },
         readable_output=tableToMarkdown(
-            f"Cyberwatch -> Cortex XSIAM BYOS ({len(assets)} assets, {vuln_count} vulnerabilities)",
+            f"Cyberwatch -> Cortex XSIAM BYOS (importer v{SCRIPT_VERSION}, "
+            f"{len(assets)} assets, {vuln_count} vulnerabilities)",
             [
                 {
                     "batch": j["batch"],
