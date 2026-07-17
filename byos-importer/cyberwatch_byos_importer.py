@@ -37,7 +37,7 @@ VERSION = "1.0"
 # Bumped every time the script's payload logic changes. Printed at startup
 # so we can tell from the war-room / logs which version XSIAM is running -
 # if you see an older value, delete the imported script and re-import.
-SCRIPT_VERSION = "1.2.0"
+SCRIPT_VERSION = "1.2.1"
 
 BYOS_PATH = "/public_api/vulnerability-management/v1/external-scans/assets"
 DEFAULT_BATCH_SIZE = 100
@@ -147,8 +147,9 @@ def _build_asset_shell(server: dict, os_name: str | None, now_ts: int) -> dict:
         "vendor": VENDOR,
         "product": (server.get("os") or {}).get("short_name") or PRODUCT,
         "version": (server.get("os") or {}).get("key") or "",
-        # BYOS rejects asset.last_seen older than 100 days; use "now" (sync
-        # moment) rather than Cyberwatch's detected_at, which can be years old.
+        # BYOS asset.last_seen must be a millisecond timestamp within the
+        # last 100 days. We use "now" (sync moment) rather than Cyberwatch's
+        # detected_at, which can be years old.
         "last_seen": now_ts,
         "origin_tags": [f"cyberwatch:server_id:{server.get('id')}"] if server.get("id") else [],
         "vulnerabilities": [],
@@ -163,7 +164,8 @@ def _build_vulnerability(cve: dict, server_entry: dict, now_ts: int) -> dict:
         "cve_id": [cve_code] if cve_code else [],
         "description": description[:1024],
         "confidence": _confidence_from_server_entry(server_entry),
-        # BYOS rejects vulnerability.last_seen older than 30 days; use "now".
+        # BYOS vulnerability.last_seen must be a millisecond timestamp
+        # within the last 30 days; use "now".
         "last_seen": now_ts,
         "raw_output": json.dumps({
             "score": cve.get("score"),
@@ -309,11 +311,14 @@ def main():
             cw_args[f"{key}[]"] = args[key]
 
     since_ts = _parse_since(args.get("since"))
-    now_ts = int(time.time())
+    # BYOS expects timestamps in milliseconds since epoch (Cortex convention,
+    # same as the XDR API). Sending seconds is silently reinterpreted as a
+    # date in 1970 and rejected with "older than 30 days".
+    now_ts = int(time.time() * 1000)
 
     demisto.info(
         f"CyberwatchBYOSImporter version={SCRIPT_VERSION} starting - "
-        f"now_ts={now_ts} since_ts={since_ts}"
+        f"now_ts={now_ts} (ms) since_ts={since_ts}"
     )
     demisto.info(f"Fetching CVEs from Cyberwatch with args={cw_args} since={since_ts}")
     list_cves = list_cyberwatch_cves(instance, cw_args)
