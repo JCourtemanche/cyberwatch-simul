@@ -22,7 +22,6 @@ XSIAM API reference:
   https://docs-cortex.paloaltonetworks.com/r/Cortex-XSIAM-Platform-APIs/Submit-assets-and-vulnerabilities-from-an-external-scanner
   https://docs-cortex.paloaltonetworks.com/r/Cortex-XSIAM-Platform-APIs/Bring-Your-Own-Scanner
 """
-import demistomock as demisto  # noqa: F401  # available in the XSIAM runtime
 from CommonServerPython import *  # noqa: F401,F403
 
 import json
@@ -40,14 +39,12 @@ DEFAULT_BATCH_SIZE = 100
 DEFAULT_HARD_LIMIT = 500
 DEFAULT_PER_PAGE = 500
 
-# Cyberwatch exploit_code_maturity -> BYOS confidence
-CONFIDENCE_MAP = {
-    "high": "High",
-    "functional": "High",
-    "proof_of_concept": "Medium",
-    "unproven": "Low",
-    "undefined": "Potential",
-}
+# The BYOS API only accepts 'Potential' or 'Confirmed' for the `confidence`
+# field. Anything Cyberwatch actively surfaces on an asset is treated as
+# Confirmed; the only downgrade is when Cyberwatch itself has marked the
+# finding as `ignored`, in which case we send Potential.
+CONFIDENCE_CONFIRMED = "Confirmed"
+CONFIDENCE_POTENTIAL = "Potential"
 
 
 # ---------------------------------------------------------------------------
@@ -122,8 +119,8 @@ def _to_unix_ts(iso_str: str | None) -> int:
     return int(dt.timestamp())
 
 
-def _confidence_from_cve(cve: dict) -> str:
-    return CONFIDENCE_MAP.get((cve.get("exploit_code_maturity") or "").lower(), "Potential")
+def _confidence_from_server_entry(server_entry: dict) -> str:
+    return CONFIDENCE_POTENTIAL if server_entry.get("ignored") else CONFIDENCE_CONFIRMED
 
 
 def _asset_key(server: dict) -> str:
@@ -133,7 +130,7 @@ def _asset_key(server: dict) -> str:
     return f"cyberwatch-hostname-{server.get('hostname', 'unknown')}"
 
 
-def _build_asset_shell(server: dict, os_name: str | None) -> dict:
+def _build_asset_shell(server: dict, os_name: str | None, now_ts: int) -> dict:
     fqdns: list[str] = []
     if server.get("hostname"):
         fqdns.append(server["hostname"])
@@ -145,21 +142,24 @@ def _build_asset_shell(server: dict, os_name: str | None) -> dict:
         "vendor": VENDOR,
         "product": (server.get("os") or {}).get("short_name") or PRODUCT,
         "version": (server.get("os") or {}).get("key") or "",
-        "last_seen": _to_unix_ts(server.get("detected_at")),
+        # BYOS rejects asset.last_seen older than 100 days; use "now" (sync
+        # moment) rather than Cyberwatch's detected_at, which can be years old.
+        "last_seen": now_ts,
         "origin_tags": [f"cyberwatch:server_id:{server.get('id')}"] if server.get("id") else [],
         "vulnerabilities": [],
     }
 
 
-def _build_vulnerability(cve: dict, server_entry: dict) -> dict:
+def _build_vulnerability(cve: dict, server_entry: dict, now_ts: int) -> dict:
     cve_code = cve.get("cve_code")
     description = cve.get("content") or cve.get("description") or cve_code or ""
     return {
         "vulnerability_id": cve_code,
         "cve_id": [cve_code] if cve_code else [],
         "description": description[:1024],
-        "confidence": _confidence_from_cve(cve),
-        "last_seen": _to_unix_ts(server_entry.get("detected_at") or cve.get("last_modified")),
+        "confidence": _confidence_from_server_entry(server_entry),
+        # BYOS rejects vulnerability.last_seen older than 30 days; use "now".
+        "last_seen": now_ts,
         "raw_output": json.dumps({
             "score": cve.get("score"),
             "epss": cve.get("epss"),
@@ -170,6 +170,7 @@ def _build_vulnerability(cve: dict, server_entry: dict) -> dict:
             "ignored": server_entry.get("ignored"),
             "active": server_entry.get("active"),
             "updates": server_entry.get("updates"),
+            "detected_at_source": server_entry.get("detected_at"),
         }, default=str)[:4000],
         "evidence": f"Detected by Cyberwatch on {server_entry.get('hostname') or 'unknown host'}",
         "scan_name": "Cyberwatch vulnerability scan",
@@ -177,7 +178,7 @@ def _build_vulnerability(cve: dict, server_entry: dict) -> dict:
 
 
 def build_assets_from_cves(instance: str | None, list_cves: list[dict],
-                           since_ts: int | None) -> tuple[list[dict], int, int]:
+                           since_ts: int | None, now_ts: int) -> tuple[list[dict], int, int]:
     """
     For each CVE returned by list_cves, fetch its `servers[]` via fetch-cve and
     aggregate into a dict of assets. Returns (assets, cve_count, dropped_count).
@@ -204,13 +205,9 @@ def build_assets_from_cves(instance: str | None, list_cves: list[dict],
             key = _asset_key(server)
             asset = assets_by_key.get(key)
             if asset is None:
-                asset = _build_asset_shell(server, (server.get("os") or {}).get("name"))
+                asset = _build_asset_shell(server, (server.get("os") or {}).get("name"), now_ts)
                 assets_by_key[key] = asset
-            asset["vulnerabilities"].append(_build_vulnerability(cve_full, server))
-            # Roll `last_seen` forward as we see fresher detections
-            new_last = _to_unix_ts(server.get("detected_at"))
-            if new_last > asset["last_seen"]:
-                asset["last_seen"] = new_last
+            asset["vulnerabilities"].append(_build_vulnerability(cve_full, server, now_ts))
 
     return list(assets_by_key.values()), considered, dropped
 
@@ -307,6 +304,7 @@ def main():
             cw_args[f"{key}[]"] = args[key]
 
     since_ts = _parse_since(args.get("since"))
+    now_ts = int(time.time())
 
     demisto.info(f"Fetching CVEs from Cyberwatch with args={cw_args} since={since_ts}")
     list_cves = list_cyberwatch_cves(instance, cw_args)
@@ -320,7 +318,7 @@ def main():
         ))
         return
 
-    assets, considered, dropped = build_assets_from_cves(instance, list_cves, since_ts)
+    assets, considered, dropped = build_assets_from_cves(instance, list_cves, since_ts, now_ts)
     vuln_count = sum(len(a["vulnerabilities"]) for a in assets)
 
     demisto.info(
