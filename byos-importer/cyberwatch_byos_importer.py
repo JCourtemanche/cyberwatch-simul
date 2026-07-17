@@ -14,12 +14,23 @@ Flow
 4. POST the payload in batches to
    `POST /public_api/vulnerability-management/v1/external-scans/assets`
    with the Cortex API key headers.
+5. Poll each returned job_id via
+   `GET /public_api/vulnerability-management/v1/external-scans/assets/jobs/<id>`
+   until a terminal job_status (COMPLETED, COMPLETED_WITH_ERRORS, FAILED)
+   or the configured timeout is hit. Auto-polling is on by default and can
+   be disabled with poll_after_submit=false.
 
-The script returns the job ids emitted by the BYOS API plus the number of
-assets and vulnerabilities submitted, so it can be chained inside a playbook.
+Standalone poll mode: pass `poll_job_id=<id>` and the script skips the whole
+Cyberwatch fetch/submit flow and just reports the current status of that
+job. Useful for a "check on this job" playbook step later on.
+
+The script returns the job ids emitted by the BYOS API, the polled status
+of each, and the number of assets and vulnerabilities submitted, so it can
+be chained inside a playbook.
 
 XSIAM API reference:
   https://docs-cortex.paloaltonetworks.com/r/Cortex-XSIAM-Platform-APIs/Submit-assets-and-vulnerabilities-from-an-external-scanner
+  https://docs-cortex.paloaltonetworks.com/r/Cortex-XSIAM-Platform-APIs/Poll-the-status-of-a-BYOS-import-job
   https://docs-cortex.paloaltonetworks.com/r/Cortex-XSIAM-Platform-APIs/Bring-Your-Own-Scanner
 """
 from CommonServerPython import *  # noqa: F401,F403
@@ -37,12 +48,22 @@ VERSION = "1.0"
 # Bumped every time the script's payload logic changes. Printed at startup
 # so we can tell from the war-room / logs which version XSIAM is running -
 # if you see an older value, delete the imported script and re-import.
-SCRIPT_VERSION = "1.2.1"
+SCRIPT_VERSION = "1.3.0"
 
-BYOS_PATH = "/public_api/vulnerability-management/v1/external-scans/assets"
+BYOS_SUBMIT_PATH = "/public_api/vulnerability-management/v1/external-scans/assets"
+BYOS_JOB_PATH = "/public_api/vulnerability-management/v1/external-scans/assets/jobs"
+# Kept as an alias for backwards compat with anyone importing from the module.
+BYOS_PATH = BYOS_SUBMIT_PATH
+
 DEFAULT_BATCH_SIZE = 100
 DEFAULT_HARD_LIMIT = 500
 DEFAULT_PER_PAGE = 500
+
+# Terminal states for the BYOS import job (per Cortex XSIAM docs).
+TERMINAL_STATUSES = frozenset({"COMPLETED", "COMPLETED_WITH_ERRORS", "FAILED"})
+
+DEFAULT_POLL_TIMEOUT = 180   # seconds
+DEFAULT_POLL_INTERVAL = 5    # seconds between polls (backs off up to 30)
 
 # The BYOS API only accepts 'Potential' or 'Confirmed' for the `confidence`
 # field. Anything Cyberwatch actively surfaces on an asset is treated as
@@ -243,7 +264,7 @@ def submit_batch(base_url: str, api_key: str, api_key_id: str, verify: bool,
 
     response = client._http_request(
         method="POST",
-        url_suffix=BYOS_PATH,
+        url_suffix=BYOS_SUBMIT_PATH,
         json_data=payload,
         resp_type="response",
         ok_codes=(200, 201, 202),
@@ -254,6 +275,140 @@ def submit_batch(base_url: str, api_key: str, api_key_id: str, verify: bool,
     except Exception:
         body = {"raw": response.text}
     return body
+
+
+# ---------------------------------------------------------------------------
+# Polling
+# ---------------------------------------------------------------------------
+
+def _byos_client(base_url: str, api_key: str, api_key_id: str, verify: bool) -> "BaseClient":
+    return BaseClient(
+        base_url=base_url.rstrip("/"),
+        verify=verify,
+        headers={
+            "x-xdr-auth-id": str(api_key_id),
+            "Authorization": api_key,
+            "Accept": "application/json",
+        },
+    )
+
+
+def poll_job(base_url: str, api_key: str, api_key_id: str, verify: bool,
+             job_id: str, timeout: int = DEFAULT_POLL_TIMEOUT,
+             interval: int = DEFAULT_POLL_INTERVAL) -> dict:
+    """
+    Poll GET /external-scans/assets/jobs/{job_id} until a terminal job_status
+    (COMPLETED / COMPLETED_WITH_ERRORS / FAILED), a 404, or the timeout is hit.
+
+    Returns the last response body enriched with poll metadata:
+      poll_attempts, poll_elapsed_seconds, poll_timeout_hit (only if true).
+    """
+    client = _byos_client(base_url, api_key, api_key_id, verify)
+    start = time.time()
+    delay = max(1, interval)
+    attempts = 0
+    last_body: dict = {"job_id": job_id}
+
+    while True:
+        attempts += 1
+        response = client._http_request(
+            method="GET",
+            url_suffix=f"{BYOS_JOB_PATH}/{job_id}",
+            resp_type="response",
+            ok_codes=(200, 404),
+            timeout=30,
+        )
+        elapsed = int(time.time() - start)
+
+        if response.status_code == 404:
+            return {
+                "job_id": job_id,
+                "job_status": "NOT_FOUND",
+                "error_log": "Job not found by the BYOS API",
+                "poll_attempts": attempts,
+                "poll_elapsed_seconds": elapsed,
+            }
+
+        try:
+            last_body = response.json() or {}
+        except Exception:
+            last_body = {"job_id": job_id, "raw": response.text}
+        last_body.setdefault("job_id", job_id)
+
+        status = str(last_body.get("job_status") or "").upper()
+        demisto.debug(f"Poll {job_id} attempt={attempts} elapsed={elapsed}s status={status}")
+
+        if status in TERMINAL_STATUSES:
+            last_body["poll_attempts"] = attempts
+            last_body["poll_elapsed_seconds"] = elapsed
+            return last_body
+
+        if elapsed >= timeout:
+            last_body["poll_timeout_hit"] = True
+            last_body["poll_attempts"] = attempts
+            last_body["poll_elapsed_seconds"] = elapsed
+            return last_body
+
+        # Wait then back off (cap at 30s to stay responsive).
+        remaining = timeout - elapsed
+        sleep_for = min(delay, max(1, remaining))
+        time.sleep(sleep_for)
+        delay = min(int(delay * 1.5), 30)
+
+
+def _extract_job_id(response: dict | None) -> str | None:
+    """The BYOS submit endpoint may return {job_id} or {reply: {job_id}}."""
+    if not response:
+        return None
+    if response.get("job_id"):
+        return response["job_id"]
+    reply = response.get("reply") or {}
+    return reply.get("job_id")
+
+
+# ---------------------------------------------------------------------------
+# Standalone poll-only mode
+# ---------------------------------------------------------------------------
+
+def _poll_only(args: dict) -> None:
+    api_url = args.get("api_url")
+    api_key = args.get("api_key")
+    api_key_id = args.get("api_key_id")
+    verify = _bool_arg(args.get("verify"), default=True)
+    job_id = str(args.get("poll_job_id")).strip()
+    timeout = int(args.get("poll_timeout") or DEFAULT_POLL_TIMEOUT)
+    interval = int(args.get("poll_interval") or DEFAULT_POLL_INTERVAL)
+
+    if not api_url or not api_key or not api_key_id:
+        raise DemistoException(
+            "'api_url', 'api_key' and 'api_key_id' are required to poll."
+        )
+
+    demisto.info(
+        f"CyberwatchBYOSImporter v{SCRIPT_VERSION} poll-only mode: "
+        f"job_id={job_id} timeout={timeout}s interval={interval}s"
+    )
+    result = poll_job(api_url, api_key, api_key_id, verify, job_id, timeout, interval)
+
+    return_results(CommandResults(
+        outputs_prefix="Cyberwatch.BYOS.Poll",
+        outputs_key_field="job_id",
+        outputs=result,
+        readable_output=tableToMarkdown(
+            f"BYOS job poll (importer v{SCRIPT_VERSION})",
+            [{
+                "job_id": result.get("job_id"),
+                "job_status": result.get("job_status"),
+                "created_timestamp": result.get("created_timestamp"),
+                "last_updated": result.get("last_updated"),
+                "poll_attempts": result.get("poll_attempts"),
+                "poll_elapsed_seconds": result.get("poll_elapsed_seconds"),
+                "error_log": result.get("error_log"),
+            }],
+            ["job_id", "job_status", "created_timestamp", "last_updated",
+             "poll_attempts", "poll_elapsed_seconds", "error_log"],
+        ),
+    ))
 
 
 def _parse_since(since: str | None) -> int | None:
@@ -283,6 +438,12 @@ def _bool_arg(value, default=False) -> bool | None:
 def main():
     args = demisto.args() or {}
 
+    # Standalone poll mode: skip the whole Cyberwatch fetch/submit flow and
+    # just report the status of an existing job.
+    if args.get("poll_job_id"):
+        _poll_only(args)
+        return
+
     api_url = args.get("api_url")
     api_key = args.get("api_key")
     api_key_id = args.get("api_key_id")
@@ -296,6 +457,9 @@ def main():
     verify = _bool_arg(args.get("verify"), default=True)
     batch_size = int(args.get("batch_size") or DEFAULT_BATCH_SIZE)
     dry_run = _bool_arg(args.get("dry_run"), default=False)
+    poll_after_submit = _bool_arg(args.get("poll_after_submit"), default=True)
+    poll_timeout = int(args.get("poll_timeout") or DEFAULT_POLL_TIMEOUT)
+    poll_interval = int(args.get("poll_interval") or DEFAULT_POLL_INTERVAL)
 
     # Build the args passed to cyberwatch-list-cves
     cw_args: dict[str, Any] = {
@@ -390,12 +554,47 @@ def main():
         }
         demisto.info(f"Submitting batch {i}: {len(batch)} assets / {batch_vulns} vulnerabilities")
         response = submit_batch(api_url, api_key, api_key_id, verify, payload)
+        job_id = _extract_job_id(response)
         jobs.append({
             "batch": i,
             "assets_in_batch": len(batch),
             "vulnerabilities_in_batch": batch_vulns,
+            "job_id": job_id,
             "response": response,
         })
+
+    # ---- Optional: poll each submitted job until it reaches a terminal state
+    if poll_after_submit:
+        demisto.info(
+            f"Auto-polling {len(jobs)} job(s) with timeout={poll_timeout}s "
+            f"interval={poll_interval}s (initial, backs off)"
+        )
+        for j in jobs:
+            if not j.get("job_id"):
+                j["poll_result"] = {"job_status": "NO_JOB_ID_RETURNED"}
+                continue
+            j["poll_result"] = poll_job(
+                api_url, api_key, api_key_id, verify,
+                j["job_id"], poll_timeout, poll_interval,
+            )
+
+    def _row(j: dict) -> dict:
+        pr = j.get("poll_result") or {}
+        return {
+            "batch": j["batch"],
+            "assets_in_batch": j["assets_in_batch"],
+            "vulnerabilities_in_batch": j["vulnerabilities_in_batch"],
+            "job_id": j.get("job_id"),
+            "job_status": pr.get("job_status") or ("submitted" if not poll_after_submit else "unknown"),
+            "poll_attempts": pr.get("poll_attempts"),
+            "poll_elapsed_seconds": pr.get("poll_elapsed_seconds"),
+            "error_log": pr.get("error_log"),
+        }
+
+    rows = [_row(j) for j in jobs]
+    total_ok = sum(1 for r in rows if r["job_status"] == "COMPLETED")
+    total_partial = sum(1 for r in rows if r["job_status"] == "COMPLETED_WITH_ERRORS")
+    total_failed = sum(1 for r in rows if r["job_status"] == "FAILED")
 
     return_results(CommandResults(
         outputs_prefix="Cyberwatch.BYOS",
@@ -405,21 +604,22 @@ def main():
             "cves_considered": considered,
             "cves_dropped_by_since": dropped,
             "jobs": jobs,
+            "poll_summary": {
+                "polled": poll_after_submit,
+                "total_jobs": len(jobs),
+                "completed": total_ok,
+                "completed_with_errors": total_partial,
+                "failed": total_failed,
+            },
         },
         readable_output=tableToMarkdown(
             f"Cyberwatch -> Cortex XSIAM BYOS (importer v{SCRIPT_VERSION}, "
-            f"{len(assets)} assets, {vuln_count} vulnerabilities)",
-            [
-                {
-                    "batch": j["batch"],
-                    "assets_in_batch": j["assets_in_batch"],
-                    "vulnerabilities_in_batch": j["vulnerabilities_in_batch"],
-                    "job_id": (j["response"] or {}).get("job_id") or (j["response"] or {}).get("reply", {}).get("job_id"),
-                    "status": (j["response"] or {}).get("status") or "submitted",
-                }
-                for j in jobs
-            ],
-            ["batch", "assets_in_batch", "vulnerabilities_in_batch", "job_id", "status"],
+            f"{len(assets)} assets, {vuln_count} vulnerabilities, "
+            f"{len(jobs)} job(s): {total_ok} completed, "
+            f"{total_partial} with errors, {total_failed} failed)",
+            rows,
+            ["batch", "assets_in_batch", "vulnerabilities_in_batch", "job_id",
+             "job_status", "poll_attempts", "poll_elapsed_seconds", "error_log"],
         ),
     ))
 

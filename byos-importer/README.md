@@ -8,7 +8,9 @@ XSIAM Automation Script that imports Cyberwatch CVEs into **Cortex Exposure Mana
 2. For each returned CVE, calls **`cyberwatch-fetch-cve`** to retrieve the affected `servers[]` (hostname, OS, detection date, prioritized flag, updates).
 3. Aggregates the results **by asset** — one asset entry, N vulnerabilities — into the shape expected by the BYOS API.
 4. `POST`s the payload in batches to `POST /public_api/vulnerability-management/v1/external-scans/assets` using the Cortex API key.
-5. Returns the per-batch `job_id` values so the caller can poll [BYOS import job status](https://docs-cortex.paloaltonetworks.com/r/Cortex-XSIAM-Platform-APIs/Poll-the-status-of-a-BYOS-import-job).
+5. **Auto-polls** each returned `job_id` via `GET /public_api/vulnerability-management/v1/external-scans/assets/jobs/<id>` until a terminal status (`COMPLETED`, `COMPLETED_WITH_ERRORS`, `FAILED`) or `poll_timeout`, with exponential backoff. Disable with `poll_after_submit=false`.
+
+**Standalone poll mode:** pass `poll_job_id=<id>` and the script skips the whole Cyberwatch flow and just reports the status of that job. Useful for a follow-up playbook step ("check on this job later").
 
 ## Files
 
@@ -57,6 +59,10 @@ XSIAM Automation Script that imports Cyberwatch CVEs into **Cortex Exposure Mana
 | `batch_size` | — | `100` | Assets per BYOS `POST` request |
 | `dry_run` | — | `false` | Build the payload but do not `POST` |
 | `verify` | — | `true` | Verify Cortex API TLS certificate |
+| `poll_after_submit` | — | `true` | After submit, poll each `job_id` until terminal status or timeout |
+| `poll_timeout` | — | `180` | Max seconds to wait for terminal status (per job) |
+| `poll_interval` | — | `5` | Initial seconds between polls, backs off exponentially (cap 30s) |
+| `poll_job_id` | — | — | **Standalone mode**: report the status of an existing job and exit. When set, all Cyberwatch/BYOS-submit args are ignored. |
 
 ## Getting the API key
 
@@ -80,6 +86,26 @@ XSIAM Automation Script that imports Cyberwatch CVEs into **Cortex Exposure Mana
 !CyberwatchBYOSImporter api_url="https://api-mytenant.xdr.eu.paloaltonetworks.com" api_key_id=42 api_key="XXXXXXXXX" dry_run=true hard_limit=50
 ```
 
+### Manual — check status of a previously submitted job
+
+```
+!CyberwatchBYOSImporter api_url="https://api-mytenant.xdr.eu.paloaltonetworks.com" api_key_id=42 api_key="XXXXXXXXX" poll_job_id="abcd-1234-..."
+```
+
+Returns:
+
+| job_id | job_status | created_timestamp | last_updated | poll_attempts | poll_elapsed_seconds | error_log |
+|---|---|---|---|---|---|---|
+| abcd-1234-... | COMPLETED | 2026-... | 2026-... | 3 | 12 | null |
+
+### Manual — submit without waiting for completion (fire and forget)
+
+```
+!CyberwatchBYOSImporter api_url="..." api_key_id=42 api_key="..." poll_after_submit=false
+```
+
+The war-room returns as soon as all batches are POSTed. You can then poll each `Cyberwatch.BYOS.jobs.job_id` in a later step with `poll_job_id`.
+
 ### Scheduled — as a Job
 
 **Settings → Playbooks → Jobs → + New Job**:
@@ -97,9 +123,11 @@ The script writes to context under `Cyberwatch.BYOS`:
 | `Cyberwatch.BYOS.vulnerabilities_count` | Total vulnerabilities submitted |
 | `Cyberwatch.BYOS.cves_considered` | CVEs kept after the `since` filter |
 | `Cyberwatch.BYOS.cves_dropped_by_since` | CVEs skipped because `last_modified` predates `since` |
-| `Cyberwatch.BYOS.jobs` | List of per-batch responses (each contains `job_id`, `assets_in_batch`, `vulnerabilities_in_batch`, and the raw API `response`) |
+| `Cyberwatch.BYOS.jobs` | List of per-batch responses (each contains `job_id`, `assets_in_batch`, `vulnerabilities_in_batch`, the raw submit `response`, and — when auto-poll ran — a `poll_result` with `job_status`, `poll_attempts`, `poll_elapsed_seconds`, `error_log`) |
+| `Cyberwatch.BYOS.poll_summary` | `{polled, total_jobs, completed, completed_with_errors, failed}` — aggregate counts across all polled jobs |
+| `Cyberwatch.BYOS.Poll.*` | Standalone poll mode only: `job_id`, `job_status`, `created_timestamp`, `last_updated`, `poll_attempts`, `poll_elapsed_seconds`, `error_log` |
 
-The `job_id`s can be fed to a follow-up call against `GET /public_api/vulnerability-management/v1/external-scans/{job_id}` to poll import status.
+Auto-poll uses `GET /public_api/vulnerability-management/v1/external-scans/assets/jobs/{job_id}`. Terminal statuses are `COMPLETED`, `COMPLETED_WITH_ERRORS`, `FAILED`; on timeout the last non-terminal status is returned with `poll_timeout_hit: true`.
 
 ## BYOS payload shape
 
