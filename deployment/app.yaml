@@ -1,0 +1,16 @@
+runtime: python311
+instance_class: F1
+
+env_variables:
+  DEBUG: "False"
+  CYBERWATCH_ACCESS_KEY: "cyberwatch-access-key"
+  CYBERWATCH_SECRET_KEY: "cyberwatch-secret-key"
+
+handlers:
+  - url: /.*
+    script: auto
+    secure: always
+
+automatic_scaling:
+  min_instances: 0
+  max_instances: 2
